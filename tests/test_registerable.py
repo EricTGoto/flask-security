@@ -13,6 +13,7 @@ from tests.test_utils import (
     authenticate,
     check_xlation,
     get_form_input,
+    init_app_with_options,
     json_authenticate,
     logout,
 )
@@ -119,6 +120,39 @@ def test_registerable_flag(clients, app, get_message):
 
     response = clients.post("/register?next=/page1", data=data, follow_redirects=True)
     assert b"Page 1" in response.data
+
+
+@pytest.mark.csrf(csrfprotect=True)
+def test_form_csrf(app, client):
+    # Test that CSRFprotect config catches CSRF requirement at unauth_csrf() decorator.
+    # Note that in this case - 400 is returned - though if CSRFprotect isn't enabled
+    # then CSRF errors are caught at form.submit time and a 200 with error values
+    # is returned.
+    response = client.post(
+        "/register",
+        data=dict(
+            email="csrf@example.com",
+            password="mypassword",
+            password_confirm="mypassword",
+        ),
+    )
+    assert response.status_code == 400
+    assert b"The CSRF token is missing" in response.data
+
+    response = client.get("/register")
+    csrf_token = get_form_input(response, "csrf_token")
+    response = client.post(
+        "/register",
+        data=dict(
+            email="csrf@example.com",
+            password="mypassword",
+            password_confirm="mypassword",
+            csrf_token=csrf_token,
+        ),
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    assert response.location == "/"
 
 
 @pytest.mark.confirmable()
@@ -898,3 +932,27 @@ def test_subclass(app, sqlalchemy_datastore):
     )
     assert response.status_code == 400
     assert "Really - don't start" in response.json["response"]["errors"][0]
+
+
+@pytest.mark.confirmable()
+@pytest.mark.settings(return_generic_responses=True)
+def test_my_mail_util(app, sqlalchemy_datastore):
+    # Test that with generic_responses - we still can get syntax/validation errors.
+    from flask_security import MailUtil, EmailValidateException
+
+    class MyMailUtil(MailUtil):
+        def validate(self, email):
+            if email.startswith("mike"):
+                raise EmailValidateException("No mikes allowed")
+
+    init_app_with_options(
+        app, sqlalchemy_datastore, **{"security_args": {"mail_util_cls": MyMailUtil}}
+    )
+
+    data = dict(
+        email="mike@lp.com",
+        password="awesome sunset",
+    )
+    client = app.test_client()
+    response = client.post("/register", data=data)
+    assert b"No mikes allowed" in response.data
